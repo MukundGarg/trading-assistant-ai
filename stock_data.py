@@ -13,49 +13,174 @@ def detect_candlestick_patterns(data):
     Detects candlestick patterns in the data.
     
     Args:
-        data: DataFrame with OHLC data
+        data: DataFrame with OHLC data (columns can be any case)
         
     Returns:
-        dict: Dictionary with pattern detection results for the last candle
+        dict: Dictionary with pattern detection results for the last completed candle
     """
-    # Get the last completed candle index
-    last_idx = len(data) - 1
+    # Initialize return dictionary with default values
+    default_return = {
+        'patterns': [],
+        'hammer': False,
+        'shooting_star': False,
+        'bullish_engulfing': False,
+        'bearish_engulfing': False
+    }
     
-    # Detect Hammer pattern
-    hammer_data = ta.cdl_pattern(data, name="hammer")
-    is_hammer = hammer_data.iloc[last_idx] > 0 if not hammer_data.empty and hammer_data.iloc[last_idx] > 0 else False
+    # Check if input is valid
+    if data is None or not isinstance(data, pd.DataFrame):
+        return default_return
     
-    # Detect Shooting Star pattern
-    shooting_star_data = ta.cdl_pattern(data, name="shootingstar")
-    is_shooting_star = shooting_star_data.iloc[last_idx] > 0 if not shooting_star_data.empty and shooting_star_data.iloc[last_idx] > 0 else False
+    # Check if DataFrame is empty
+    if data.empty:
+        return default_return
     
-    # Detect Engulfing pattern (returns positive for bullish, negative for bearish)
-    engulfing_data = ta.cdl_pattern(data, name="engulfing")
-    if not engulfing_data.empty:
-        engulfing_value = engulfing_data.iloc[last_idx]
-        is_bullish_engulfing = engulfing_value > 0
-        is_bearish_engulfing = engulfing_value < 0
-    else:
+    # Check if we have enough rows (need at least 50 for reliable pattern detection)
+    if len(data) < 50:
+        return default_return
+    
+    try:
+        # Create a copy to avoid modifying original data
+        df = data.copy()
+        
+        # Normalize column names to lowercase
+        df.columns = df.columns.str.lower()
+        
+        # Ensure required columns exist
+        required_cols = ['open', 'high', 'low', 'close']
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            return default_return
+        
+        # Determine the last completed candle index
+        # Use -2 if we suspect the last candle is still forming, otherwise -1
+        # We'll check the last few candles to determine which is most recent complete
+        if len(df) >= 2:
+            # Check last two candles - if very close in time, use -2 (last completed)
+            # Otherwise use -1 (most recent)
+            try:
+                last_time = df.index[-1]
+                second_last_time = df.index[-2]
+                time_diff = (last_time - second_last_time).total_seconds() if hasattr(last_time - second_last_time, 'total_seconds') else 0
+                # If last candle is within expected timeframe window, it might be forming
+                # For safety, use -2 as the last completed candle
+                last_completed_idx = -2 if len(df) >= 2 else -1
+            except Exception:
+                # Fallback to -1 if time comparison fails
+                last_completed_idx = -1
+        else:
+            last_completed_idx = -1
+        
+        # Ensure we have a valid index
+        if abs(last_completed_idx) > len(df):
+            last_completed_idx = -1
+        
+        # Detect all candlestick patterns using pandas-ta
+        patterns_df = None
+        try:
+            # Try using df.ta accessor with name="all" to get all patterns
+            patterns_df = df.ta.cdl_pattern(name="all")
+        except (AttributeError, TypeError, ValueError) as e:
+            try:
+                # Fallback to function call if accessor doesn't work
+                patterns_df = ta.cdl_pattern(df, name="all")
+            except Exception:
+                # If "all" doesn't work, try detecting patterns individually
+                try:
+                    # Try individual pattern detection as last resort
+                    hammer_df = df.ta.cdl_pattern(name="hammer")
+                    shootingstar_df = df.ta.cdl_pattern(name="shootingstar")
+                    engulfing_df = df.ta.cdl_pattern(name="engulfing")
+                    
+                    # Combine into single DataFrame
+                    patterns_df = pd.DataFrame(index=df.index)
+                    if not hammer_df.empty:
+                        patterns_df['CDL_HAMMER'] = hammer_df.iloc[:, 0] if len(hammer_df.columns) > 0 else 0
+                    if not shootingstar_df.empty:
+                        patterns_df['CDL_SHOOTINGSTAR'] = shootingstar_df.iloc[:, 0] if len(shootingstar_df.columns) > 0 else 0
+                    if not engulfing_df.empty:
+                        patterns_df['CDL_ENGULFING'] = engulfing_df.iloc[:, 0] if len(engulfing_df.columns) > 0 else 0
+                except Exception:
+                    # If all else fails, return empty results
+                    patterns_df = None
+        
+        # Check if patterns were detected
+        if patterns_df is None or patterns_df.empty:
+            return default_return
+        
+        # Get pattern values for the last completed candle
+        if abs(last_completed_idx) > len(patterns_df):
+            last_completed_idx = -1
+        
+        last_row = patterns_df.iloc[last_completed_idx]
+        
+        # Check for specific patterns we're interested in
+        is_hammer = False
+        is_shooting_star = False
         is_bullish_engulfing = False
         is_bearish_engulfing = False
+        
+        # Get column names (case-insensitive matching)
+        pattern_cols = [col.upper() for col in patterns_df.columns]
+        
+        # Check for Hammer pattern (try various column name formats)
+        hammer_col = None
+        for col in patterns_df.columns:
+            if 'HAMMER' in col.upper():
+                hammer_col = col
+                break
+        
+        if hammer_col is not None:
+            hammer_value = last_row[hammer_col]
+            is_hammer = pd.notna(hammer_value) and hammer_value > 0
+        
+        # Check for Shooting Star pattern
+        shooting_star_col = None
+        for col in patterns_df.columns:
+            if 'SHOOTING' in col.upper() and 'STAR' in col.upper():
+                shooting_star_col = col
+                break
+        
+        if shooting_star_col is not None:
+            shooting_star_value = last_row[shooting_star_col]
+            is_shooting_star = pd.notna(shooting_star_value) and shooting_star_value > 0
+        
+        # Check for Engulfing patterns
+        engulfing_col = None
+        for col in patterns_df.columns:
+            if 'ENGULFING' in col.upper():
+                engulfing_col = col
+                break
+        
+        if engulfing_col is not None:
+            engulfing_value = last_row[engulfing_col]
+            if pd.notna(engulfing_value):
+                is_bullish_engulfing = engulfing_value > 0
+                is_bearish_engulfing = engulfing_value < 0
+        
+        # Build patterns list
+        patterns_detected = []
+        if is_hammer:
+            patterns_detected.append("Hammer (Bullish)")
+        if is_shooting_star:
+            patterns_detected.append("Shooting Star (Bearish)")
+        if is_bullish_engulfing:
+            patterns_detected.append("Bullish Engulfing")
+        if is_bearish_engulfing:
+            patterns_detected.append("Bearish Engulfing")
+        
+        return {
+            'patterns': patterns_detected,
+            'hammer': is_hammer,
+            'shooting_star': is_shooting_star,
+            'bullish_engulfing': is_bullish_engulfing,
+            'bearish_engulfing': is_bearish_engulfing
+        }
     
-    patterns_detected = []
-    if is_hammer:
-        patterns_detected.append("Hammer (Bullish)")
-    if is_shooting_star:
-        patterns_detected.append("Shooting Star (Bearish)")
-    if is_bullish_engulfing:
-        patterns_detected.append("Bullish Engulfing")
-    if is_bearish_engulfing:
-        patterns_detected.append("Bearish Engulfing")
-    
-    return {
-        'patterns': patterns_detected,
-        'hammer': is_hammer,
-        'shooting_star': is_shooting_star,
-        'bullish_engulfing': is_bullish_engulfing,
-        'bearish_engulfing': is_bearish_engulfing
-    }
+    except Exception as e:
+        # Log error for debugging (in production, use proper logging)
+        print(f"Error detecting candlestick patterns: {str(e)}")
+        return default_return
 
 def generate_no_pattern_explanation(trend_context, volume, current_price, symbol=""):
     """
